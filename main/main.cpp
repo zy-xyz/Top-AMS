@@ -2,7 +2,7 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
-#include <esp_log.h>
+#include <esp_rom_sys.h>
 
 // #undef F
 
@@ -645,9 +645,12 @@ namespace topams {
 
 
 
-//诊断用:项目覆盖了 Arduino 的 app_main,没调 initArduino,stdout 未初始化,
-//printf/std::cout 全被丢弃。只有 ESP_LOGI 走 esp_log 自己的 UART 通道可用。
-#define BOOTMARK(x) ESP_LOGI("BOOT", "%s", x)
+//诊断用:stdout/std::cout 未初始化,ESP_LOGI 在 app_main 入口也不稳。
+//esp_rom_printf 是 ROM 里的裸输出,和 bootloader 同一套通道,一定出得来。
+#define BOOTMARK(x)                    \
+    do {                               \
+        esp_rom_printf("[BOOT] %s\r\n", x); \
+    } while (0)
 
 extern "C" void app_main(void) {
     using namespace mesp;
