@@ -2,6 +2,7 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
+#include <esp_log.h>
 
 // #undef F
 
@@ -644,12 +645,9 @@ namespace topams {
 
 
 
-//诊断用:printf 比 std::cout 可靠,C++ 流初始化前也能出
-#define BOOTMARK(x)               \
-    do {                          \
-        printf("[BOOT] " x "\n"); \
-        fflush(stdout);           \
-    } while (0)
+//诊断用:项目覆盖了 Arduino 的 app_main,没调 initArduino,stdout 未初始化,
+//printf/std::cout 全被丢弃。只有 ESP_LOGI 走 esp_log 自己的 UART 通道可用。
+#define BOOTMARK(x) ESP_LOGI("BOOT", "%s", x)
 
 extern "C" void app_main(void) {
     using namespace mesp;
@@ -684,6 +682,7 @@ extern "C" void app_main(void) {
 
     smartWIFI wifi("Redmi_F1F8-3", "15823343626");//写死,跳过配网
     BOOTMARK("wifi ctor done");
+    webfpr("BOOT wifi ssid=" + Exstring(mesp::smartWIFI::Wifi_ssid.get().c_str()));
     wifi.connected();
     BOOTMARK("wifi connected");
 
