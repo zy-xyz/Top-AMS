@@ -713,7 +713,7 @@ extern "C" void app_main(void) {
             },
             [](AsyncWebServerRequest* request, String filename, size_t index, uint8_t* data, size_t len, bool final) {
                 if (!index) {
-                    webfpr("OTA 开始:" + Exstring(filename.c_str()));
+                    webfpr(Exstring<64>("OTA 开始") + Exstring<32>(filename.c_str()));
                     if (!Update.begin(UPDATE_SIZE_UNKNOWN))
                         Update.printError(Serial);
                 }
@@ -721,9 +721,9 @@ extern "C" void app_main(void) {
                     Update.printError(Serial);
                 if (final) {
                     if (Update.end(true))
-                        webfpr("OTA 写完:" + Exstring(Update.size()));
+                        webfpr(Exstring<32>("OTA 写完") + Exstring<16>((int32_t)Update.size()));
                     else
-                        webfpr("OTA 失败");
+                        webfpr(Exstring<16>("OTA 失败"));
                 }
             });
 
