@@ -597,11 +597,10 @@ namespace topams {
                                        clk::now().time_since_epoch())
                                        .count();
             //挤出机在动、状态新鲜、无故障才补料
-            const bool printing = topams::print_state.load() == 2
-                                  || (topams::print_state.load() != 0 && topams::mc_remaining.load() > 0);
+            //不再依赖打印状态:拓竹增量推送可能整场都不带 gcode_state,
+            //蓝牙版 App 也只有「辅助送料」一个开关,没有状态门控。
+            //安全性由开关、微动弹开即停、连续超限自动关三层保证。
             if (!topams::assist_config::enable.get_value()
-                || !printing
-                || now_ms - topams::print_state_ms.load() > 60000
                 || topams::current_fault.load() != (int32_t)topams::fault::none) {
                 burst_ms = 0;
                 continue;
