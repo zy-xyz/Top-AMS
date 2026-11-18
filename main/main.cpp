@@ -647,13 +647,20 @@ namespace topams {
 
 //诊断用:stdout/std::cout 未初始化,ESP_LOGI 在 app_main 入口也不稳。
 //esp_rom_printf 是 ROM 里的裸输出,和 bootloader 同一套通道,一定出得来。
-#define BOOTMARK(x)                    \
-    do {                               \
-        esp_rom_printf("[BOOT] %s\r\n", x); \
+#define BOOTMARK(x)                       \
+    do {                                  \
+        printf("[BOOT] " x "\r\n");       \
+        fflush(stdout);                   \
     } while (0)
 
 extern "C" void app_main(void) {
     using namespace mesp;
+
+    //项目覆盖了 Arduino 的 app_main,没走 initArduino,UART 驱动从未初始化,
+    //stdout 和 esp_rom_printf 都被 VFS 吞掉。这里手动把 Serial 和 stdout 拉起来。
+    Serial.begin(115200);
+    delay(50);
+    setvbuf(stdout, nullptr, _IONBF, 0);
 
     BOOTMARK("app_main enter");
 
