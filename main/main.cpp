@@ -376,6 +376,25 @@ namespace topams {
 
 
 
+    //手动辅助送料:不管微动和打印状态,按当前脉冲时长推一次,用于穿线/补料
+    //写成具名函数而不是塞进 command_emplace 的模板参数:GCC 在模板实参里解析
+    //lambda 体内的 '>' 会误判为模板参数结束符
+    void assist_feed(int32_t channel_id) {
+        if (channel_id < 1 || channel_id > (int32_t)topams::motors.size()) {
+            webfpr("辅助送料通道错误");
+            return;
+        }
+        if (!topams::motor_lock[channel_id - 1].try_lock()) {
+            webfpr("该通道正忙,稍后再试");
+            return;
+        }
+        const int32_t ms = topams::assist_config::pulse.get_value();
+        webfpr("辅助送料 " + Exstring(ms) + "ms");
+        motor_jog(channel_id, true, ms, 10, [] { return true; });
+        topams::motor_lock[channel_id - 1].unlock();
+    }//assist_feed
+
+
     //注册command命令
     inline mstd::call_once register_command(
         []() {
@@ -391,21 +410,7 @@ namespace topams {
                 load_filament(extruder_id);
             }>("load_filament");
 
-            //手动辅助送料:不管微动和打印状态,按当前脉冲时长推一次,用于穿线/补料
-            mesp::command_emplace<+[](int32_t channel_id) {
-                if (channel_id < 1 || channel_id > (int32_t)topams::motors.size()) {
-                    webfpr("辅助送料通道错误");
-                    return;
-                }
-                if (!topams::motor_lock[channel_id - 1].try_lock()) {
-                    webfpr("该通道正忙,稍后再试");
-                    return;
-                }
-                const int32_t ms = topams::assist_config::pulse.get_value();
-                webfpr("辅助送料 " + Exstring(ms) + "ms");
-                motor_jog(channel_id, true, ms, 10, [] { return true; });
-                topams::motor_lock[channel_id - 1].unlock();
-            }>("assist_feed");
+            mesp::command_emplace<assist_feed>("assist_feed");
 
             mesp::command_emplace<+[]() {
                 mqttclient.topic_publish = mqtt_config::topic_publish();
