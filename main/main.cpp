@@ -2,7 +2,8 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
-#include <esp_rom_sys.h>
+#include <driver/uart.h>
+#include <cstring>
 
 // #undef F
 
@@ -647,20 +648,20 @@ namespace topams {
 
 //诊断用:stdout/std::cout 未初始化,ESP_LOGI 在 app_main 入口也不稳。
 //esp_rom_printf 是 ROM 里的裸输出,和 bootloader 同一套通道,一定出得来。
-#define BOOTMARK(x)                       \
-    do {                                  \
-        printf("[BOOT] " x "\r\n");       \
-        fflush(stdout);                   \
+//诊断用:不依赖 Arduino/stdio/VFS,直接走 ESP-IDF UART 驱动
+static inline void bootlog(const char* s) {
+    uart_write_bytes(UART_NUM_0, s, strlen(s));
+}
+#define BOOTMARK(x)      \
+    do {                 \
+        bootlog("[BOOT] " x "\r\n"); \
     } while (0)
 
 extern "C" void app_main(void) {
     using namespace mesp;
 
-    //项目覆盖了 Arduino 的 app_main,没走 initArduino,UART 驱动从未初始化,
-    //stdout 和 esp_rom_printf 都被 VFS 吞掉。这里手动把 Serial 和 stdout 拉起来。
-    Serial.begin(115200);
-    delay(50);
-    setvbuf(stdout, nullptr, _IONBF, 0);
+    //不碰 Arduino 的 Serial:运行时没初始化,直接 begin 会崩(实测复位循环)
+    uart_driver_install(UART_NUM_0, 512, 0, 0, NULL, 0);
 
     BOOTMARK("app_main enter");
 
