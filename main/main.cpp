@@ -2,7 +2,6 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
-#include <driver/uart.h>
 #include <cstring>
 
 // #undef F
@@ -648,9 +647,16 @@ namespace topams {
 
 //诊断用:stdout/std::cout 未初始化,ESP_LOGI 在 app_main 入口也不稳。
 //esp_rom_printf 是 ROM 里的裸输出,和 bootloader 同一套通道,一定出得来。
-//诊断用:不依赖 Arduino/stdio/VFS,直接走 ESP-IDF UART 驱动
+//诊断用:直接写 UART0 寄存器。不碰 Arduino Serial、不装 uart 驱动
+//(uart_driver_install 接管 console UART0 会死锁)、不走 VFS。
+#define UART0_FIFO_REG   (*(volatile uint32_t*)(0x60000000UL + 0x00))
+#define UART0_STATUS_REG (*(volatile uint32_t*)(0x60000000UL + 0x1C))
+
 static inline void bootlog(const char* s) {
-    uart_write_bytes(UART_NUM_0, s, strlen(s));
+    for (; *s; ++s) {
+        while (((UART0_STATUS_REG >> 16) & 0xFF) >= 100) {}
+        UART0_FIFO_REG = (uint32_t)(uint8_t)*s;
+    }
 }
 #define BOOTMARK(x)      \
     do {                 \
@@ -660,8 +666,7 @@ static inline void bootlog(const char* s) {
 extern "C" void app_main(void) {
     using namespace mesp;
 
-    //不碰 Arduino 的 Serial:运行时没初始化,直接 begin 会崩(实测复位循环)
-    uart_driver_install(UART_NUM_0, 512, 0, 0, NULL, 0);
+    //裸写 UART0 寄存器,不装驱动、不走 VFS、不碰 Arduino Serial
 
     BOOTMARK("app_main enter");
 
