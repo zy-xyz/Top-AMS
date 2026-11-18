@@ -92,10 +92,4 @@ namespace topams {
         inline static ws_nvs_value<int32_t> dbnc{"assist_dbnc", 3};//去抖采样次数(10ms一次)
         inline static ws_nvs_value<int32_t> limit{"assist_limit", 15000};//连续补料累计上限(ms),超了自动关
     };//assist_config
-
-    //自动续料:当前通道报没料时,自动切到该通道配置的续料通道
-    struct refill_config {
-        inline static ws_nvs_value<bool> enable{"refill_enable", false};//默认关,确认换料流程无误后再开
-        inline static ws_nvs_value<int32_t> pause_wait{"refill_pwait", 15000};//等打印机暂停的最长时间(ms)
-    };//refill_config
 }

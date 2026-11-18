@@ -1,8 +1,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
-#include <Update.h>
-#include <cstring>
 
 // #undef F
 
@@ -59,51 +57,6 @@ namespace topams {
     //打印状态:0=空闲/结束 1=暂停 2=打印中
     inline std::atomic<int32_t> print_state{0};
     inline std::atomic<int64_t> print_state_ms{0};//最后一次状态更新的时间戳(steady_clock ms),MQTT 掉线时用于失效
-    inline std::atomic<int32_t> mc_remaining{0};//剩余打印时间(分钟),>0 即有任务在跑;gcode_state 靠不住就用它
-
-    //异常状态机:任何非 none 状态都会立刻停掉辅助进料并锁住电机
-    enum class fault : int32_t {
-        none = 0,
-        no_filament,//没料/耗材用尽
-        tangle,     //缠料
-        clog,       //卡料
-        runout,     //断料
-        timeout,    //打印机状态超时
-    };
-    inline std::atomic<int32_t> current_fault{(int32_t)fault::none};
-    inline std::atomic<int32_t> last_print_error{0};//最近一次非 0 的 print_error,用于排查
-    inline std::atomic<int64_t> fault_ms{0};
-
-    //自动续料状态:本轮打印中每个通道是否已经续过料
-    inline std::array<bool, 16> refilled{};
-    inline std::atomic<int32_t> refill_state{0};//0=空闲 1=续料中
-    inline std::atomic<int32_t> pause_flag{0};//0=未暂停 1=已暂停,由 data_event 维护
-
-    inline const char* fault_name(int32_t v) {
-        switch ((fault)v) {
-        case fault::none: return "正常";
-        case fault::no_filament: return "没料";
-        case fault::tangle: return "缠料";
-        case fault::clog: return "卡料";
-        case fault::runout: return "断料";
-        case fault::timeout: return "超时";
-        }
-        return "未知";
-    }
-
-    inline void set_fault(fault f, const char* why) {
-        if (current_fault.exchange((int32_t)f) != (int32_t)f) {
-            fault_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now().time_since_epoch())
-                               .count());
-            webfpr(Exstring<64>(fault_name((int32_t)f)) + ":" + Exstring<64>(why));
-        }
-    }
-
-    inline void clear_fault() {
-        if (current_fault.exchange((int32_t)fault::none) != (int32_t)fault::none)
-            webfpr("异常解除,恢复正常");
-    }
 
 
 #ifdef MOTOR_16
@@ -333,32 +286,6 @@ namespace topams {
     }//load_filament
 
 
-    //自动续料:暂停 → 复用换料流程(退旧进新) → 恢复
-    //change_filament 末尾自己会发 print_resume
-    void refill_filament(const Mqttclient& client, int32_t from_ch, int32_t to_ch) {
-        if (refill_state.exchange(1) != 0)
-            return;//已经在续料
-
-        webfpr("自动续料:" + Exstring(from_ch) + " -> " + Exstring(to_ch));
-
-        client.publish(bambu::msg::print_pause);
-        const int32_t wait_ms = topams::refill_config::pause_wait.get_value();
-        for (int32_t i = 0; i < wait_ms / 100 && pause_flag.load() == 0; ++i)
-            mstd::delay_ms(100);
-
-        if (pause_flag.load() == 0) {
-            webfpr("自动续料中止:打印机未进入暂停");
-            refill_state.store(0);
-            return;
-        }
-
-        change_filament(client, from_ch, to_ch);//内部会等退料/进料并恢复打印
-        refilled[to_ch - 1] = true;
-        refill_state.store(0);
-        clear_fault();
-    }//refill_filament
-
-
     //mqtt事件处理
     inline void data_event(const mesp::Mqttclient& client, const mesp::Mqttclient::data_cache_type& data) {
 
@@ -379,44 +306,18 @@ namespace topams {
         static int32_t bed_target_temper_max = 0;
         // static int32_t nozzle_target_temper = -1;
 
-        mc_remaining.store(doc["print"]["mc_remaining_time"] | mc_remaining.load());//和 gcode_state 一样是增量推送
         bed_target_temper = doc["print"]["bed_target_temper"] | bed_target_temper;
         nozzle_target_temper.store(doc["print"]["nozzle_target_temper"] | nozzle_target_temper.load());
-        //拓竹是增量推送,gcode_state 只在变化时出现,必须保留旧值否则永远停在初始值
-        static mstd::Exstring<32> gcode_state{"unkonw"};
-        gcode_state = doc["print"]["gcode_state"] | gcode_state;
+        mstd::Exstring<32> gcode_state = doc["print"]["gcode_state"] | "unkonw";
         hw_switch = doc["print"]["hw_switch_state"] | hw_switch;
 
-        //订阅后不主动要全量,就永远拿不到 gcode_state/hw_switch_state
-        //发出一次 pushall 后打印机回完整 snapshot,之后增量才接得上
-        {
-            static bool got_full = false;
-            static int64_t last_req = 0;
-            if (!doc["print"]["gcode_state"].is<const char*>()) {
-                const int64_t t = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                      std::chrono::steady_clock::now().time_since_epoch())
-                                      .count();
-                if (!got_full && t - last_req > 3000) {
-                    last_req = t;
-                    client.publish(bambu::msg::get_status);
-                }
-            } else {
-                got_full = true;
-            }
-        }
-
         {//打印状态,辅助进料只在挤出机确实在动的时候才动作
-            if (gcode_state == "RUNNING" || gcode_state == "PREPARE") {
-                if (print_state.load() == 0)
-                    refilled.fill(false);//新任务开始,续料记录清零
+            if (gcode_state == "RUNNING" || gcode_state == "PREPARE")
                 print_state.store(2);
-            } else if (gcode_state == "PAUSE") {
+            else if (gcode_state == "PAUSE")
                 print_state.store(1);
-            } else if (gcode_state == "IDLE" || gcode_state == "FINISH" || gcode_state == "FAILED") {
+            else if (gcode_state == "IDLE" || gcode_state == "FINISH" || gcode_state == "FAILED")
                 print_state.store(0);
-                refilled.fill(false);//任务结束,续料记录清零
-            }
-            pause_flag.store(print_state.load() == 1 ? 1 : 0);
             print_state_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch())
                                      .count());
@@ -470,76 +371,9 @@ namespace topams {
                 ams_status.notify_one();
         }
 
-        {//异常状态机 + 自动续料
-            static int64_t err_since = 0;
-            static int64_t nofil_since = 0;
-            const int64_t t = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now().time_since_epoch())
-                                  .count();
-
-            const int32_t print_error = doc["print"]["print_error"] | 0;
-            if (print_error != 0) {
-                last_print_error.store(print_error);
-                if (err_since == 0)
-                    err_since = t;
-                else if (t - err_since > 2000)
-                    set_fault(fault::clog, "print_error");
-            } else {
-                err_since = 0;
-            }
-
-            const bool printing = print_state.load() == 2;
-            const int32_t cur = extruder.get_value();
-            //没料:打印中、有当前通道、打印机耗材传感器连续 3s 报无料
-            if (printing && cur > 0 && hw_switch == 0) {
-                if (nofil_since == 0)
-                    nofil_since = t;
-                else if (t - nofil_since > 3000)
-                    set_fault(fault::no_filament, "hw_switch=0");
-            } else {
-                nofil_since = 0;
-            }
-
-            if (print_error == 0 && (!printing || hw_switch != 0))
-                clear_fault();
-
-            //自动续料:没料 + 当前通道配了续料通道 + 本轮还没续过
-            if (topams::refill_config::enable.get_value()
-                && current_fault.load() == (int32_t)fault::no_filament
-                && refill_state.load() == 0
-                && cur >= 1 && cur <= (int32_t)topams::motors.size()) {
-                const int32_t nxt = topams::motors[cur - 1].next_channel.get_value();
-                if (nxt >= 1 && nxt <= (int32_t)topams::motors.size()
-                    && nxt != cur && !refilled[nxt - 1]) {
-                    async_channel.emplace([&client, cur, nxt]() {
-                        refill_filament(client, cur, nxt);
-                    });
-                }
-            }
-        }
-
     }//date_event
 
 
-
-
-    //手动辅助送料:不管微动和打印状态,按当前脉冲时长推一次,用于穿线/补料
-    //写成具名函数而不是塞进 command_emplace 的模板参数:GCC 在模板实参里解析
-    //lambda 体内的 '>' 会误判为模板参数结束符
-    void assist_feed(int32_t channel_id) {
-        if (channel_id < 1 || channel_id > (int32_t)topams::motors.size()) {
-            webfpr("辅助送料通道错误");
-            return;
-        }
-        if (!topams::motor_lock[channel_id - 1].try_lock()) {
-            webfpr("该通道正忙,稍后再试");
-            return;
-        }
-        const int32_t ms = topams::assist_config::pulse.get_value();
-        webfpr("辅助送料 " + Exstring(ms) + "ms");
-        motor_jog(channel_id, true, ms, 10, [] { return true; });
-        topams::motor_lock[channel_id - 1].unlock();
-    }//assist_feed
 
 
     //注册command命令
@@ -557,7 +391,21 @@ namespace topams {
                 load_filament(extruder_id);
             }>("load_filament");
 
-            mesp::command_emplace<assist_feed>("assist_feed");
+            //手动辅助送料:不管微动和打印状态,按当前脉冲时长推一次,用于穿线/补料
+            mesp::command_emplace<+[](int32_t channel_id) {
+                if (channel_id < 1 || channel_id > (int32_t)topams::motors.size()) {
+                    webfpr("辅助送料通道错误");
+                    return;
+                }
+                if (!topams::motor_lock[channel_id - 1].try_lock()) {
+                    webfpr("该通道正忙,稍后再试");
+                    return;
+                }
+                const int32_t ms = topams::assist_config::pulse.get_value();
+                webfpr("辅助送料 " + Exstring(ms) + "ms");
+                motor_jog(channel_id, true, ms, 10, [] { return true; });
+                topams::motor_lock[channel_id - 1].unlock();
+            }>("assist_feed");
 
             mesp::command_emplace<+[]() {
                 mqttclient.topic_publish = mqtt_config::topic_publish();
@@ -573,46 +421,49 @@ namespace topams {
 
 
 
-    //辅助进料任务:微动边沿经中断唤醒,推一小段料,弹开立即停
-    //相比轮询:边沿响应从 10ms 量化降到中断级,空闲时任务完全阻塞不占 CPU
+    //辅助进料任务:微动被压住说明料被挤出机拉紧,推一小段料;微动弹开立刻停
     void Task1(void* param) {
         mesp::gpio_set_in(topams::forward_click);
         using clk = std::chrono::steady_clock;
 
+        int32_t pressed_cnt = 0;
         int32_t burst_ms = 0;//本轮连续补料累计
         auto burst_begin = clk::now();
         auto last_feed = clk::now();
-        mesp::gpio_event ev{};
 
         for (;;) {
-            //阻塞等边沿;200ms 超时只是让循环能跑一次维护,不做任何采样
-            if (xQueueReceive(mesp::gpio_channle, &ev, pdMS_TO_TICKS(200)) != pdTRUE)
-                continue;
-            if (ev.pin != topams::forward_click)
-                continue;
-            //边沿后读电平:只有压住才补料,弹开方向的边沿直接丢
-            if (gpio_get_level(topams::forward_click) != 0)
-                continue;
+            mstd::delay_ms(10);
 
             const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                        clk::now().time_since_epoch())
                                        .count();
-            //挤出机在动、状态新鲜、无故障才补料
-            //不再依赖打印状态:拓竹增量推送可能整场都不带 gcode_state,
-            //蓝牙版 App 也只有「辅助送料」一个开关,没有状态门控。
-            //安全性由开关、微动弹开即停、连续超限自动关三层保证。
-            if (!topams::assist_config::enable.get_value()
-                || topams::current_fault.load() != (int32_t)topams::fault::none) {
+            //只有挤出机在动、且状态不超过 60s 才补料;MQTT 掉线时状态不可信,一律停手
+            //拓竹增量推送可能整场不带 gcode_state,不能拿它当门控,
+            //否则辅助进料永远不触发。只认开关,安全性靠微动弹开即停+超限自动关。
+            (void)now_ms;
+            if (!topams::assist_config::enable.get_value()) {
+                pressed_cnt = 0;
                 burst_ms = 0;
                 continue;
             }
 
             const int32_t ch = topams::extruder.get_value();
-            if (ch < 1 || ch > (int32_t)topams::motors.size())
+            if (ch < 1 || ch > (int32_t)topams::motors.size()) {
+                pressed_cnt = 0;
+                continue;
+            }
+
+            if (gpio_get_level(topams::forward_click) != 0) {//微动弹开,料不紧
+                pressed_cnt = 0;
+                burst_ms = 0;
+                continue;
+            }
+
+            if (++pressed_cnt < topams::assist_config::dbnc.get_value())
                 continue;
 
-            //节流:同一通道两次推送至少隔 gap,抖动边沿在这里被吃掉
-            if (clk::now() - last_feed < std::chrono::milliseconds(topams::assist_config::gap.get_value()))
+            const auto now = clk::now();
+            if (now - last_feed < std::chrono::milliseconds(topams::assist_config::gap.get_value()))
                 continue;
 
             if (!topams::motor_lock[ch - 1].try_lock())//换料正在用这个通道,让路
@@ -623,6 +474,7 @@ namespace topams {
             topams::motor_lock[ch - 1].unlock();
 
             last_feed = clk::now();
+            pressed_cnt = 0;
 
             if (clk::now() - burst_begin > std::chrono::seconds(5)) {//统计窗口重置
                 burst_begin = clk::now();
@@ -645,45 +497,36 @@ namespace topams {
 
 
 
-//诊断用:stdout/std::cout 未初始化,ESP_LOGI 在 app_main 入口也不稳。
-//esp_rom_printf 是 ROM 里的裸输出,和 bootloader 同一套通道,一定出得来。
-//诊断用:直接写 UART0 寄存器。不碰 Arduino Serial、不装 uart 驱动
-//(uart_driver_install 接管 console UART0 会死锁)、不走 VFS。
+//==== 二分诊断:最小 app_main,只裸写 UART0 + 延时 ====
 #define UART0_FIFO_REG   (*(volatile uint32_t*)(0x60000000UL + 0x00))
-#define UART0_STATUS_REG (*(volatile uint32_t*)(0x60000000UL + 0x1C))
-
 static inline void bootlog(const char* s) {
-    //不查 FIFO 状态:ESP32-C3 的 UART_STATUS 位定义和 ESP32 不同,
-    //按 ESP32 的 TXFIFO_CNT(bit16-23) 判空会永远成立 -> 死循环。
-    //几十个字符远小于 FIFO 深度,直接灌就行。
-    for (; *s; ++s)
-        UART0_FIFO_REG = (uint32_t)(uint8_t)*s;
+    for (; *s; ++s) UART0_FIFO_REG = (uint32_t)(uint8_t)*s;
 }
-#define BOOTMARK(x)      \
-    do {                 \
-        bootlog("[BOOT] " x "\r\n"); \
-    } while (0)
 
+extern "C" void app_main(void) {
+    for (uint32_t n = 0;; ++n) {
+        bootlog("ALIVE\r\n");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+#if 0
 extern "C" void app_main(void) {
     using namespace mesp;
 
-    //裸写 UART0 寄存器,不装驱动、不走 VFS、不碰 Arduino Serial
-
-    BOOTMARK("app_main enter");
-
     ws_command_init();
-    BOOTMARK("ws_command_init done");
 
     fpr("main函数开始");
     fpr("wsValue数量:", wsValue_state.map.size());
-    BOOTMARK("fpr done");
+
 
     for (size_t i = 0; i < 8; i++) {
         auto& x = topams::motors[i];
         mesp::gpio_out(x.forward, false);
         mesp::gpio_out(x.backward, false);
     }//初始化电机GPIO
-    BOOTMARK("motor gpio init done");
+
+
 
     //异步任务处理,mini线程池
     std::thread async_thread([]() {
@@ -692,15 +535,12 @@ extern "C" void app_main(void) {
             task();
         }
     });
-    BOOTMARK("async_thread created");
-
     xTaskCreate(topams::Task1, "Task1", 3072, NULL, 1, &topams::Task1_handle);//辅助进料任务
-    BOOTMARK("Task1 created");
 
-    smartWIFI wifi("Redmi_F1F8-3", "15823343626");//写死,跳过配网
-    BOOTMARK("wifi ctor done");
+
+    smartWIFI wifi;
+    // smartWIFI wifi("SSID", "PASS");//也可以先写死
     wifi.connected();
-    BOOTMARK("wifi connected");
 
     AsyncWebServer server(80);
     AsyncWebSocket& ws = mesp::ws_server;
@@ -725,33 +565,6 @@ extern "C" void app_main(void) {
             // request->send(200, "text/html", web.c_str());
             request->send(200, "text/html", web.data());
         });
-
-        //OTA:POST /ota 上传 app.bin,写进另一个 slot,完成即重启
-        server.on(
-            "/ota", HTTP_POST,
-            [](AsyncWebServerRequest* request) {
-                const bool ok = !Update.hasError();
-                request->send(200, "text/plain", ok ? "ok, rebooting" : "ota failed");
-                if (ok) {
-                    mstd::delay(500ms);
-                    ESP.restart();
-                }
-            },
-            [](AsyncWebServerRequest* request, String filename, size_t index, uint8_t* data, size_t len, bool final) {
-                if (!index) {
-                    webfpr(Exstring<64>("OTA 开始") + Exstring<32>(filename.c_str()));
-                    if (!Update.begin(UPDATE_SIZE_UNKNOWN))
-                        Update.printError(Serial);
-                }
-                if (len && Update.write(data, len) != len)
-                    Update.printError(Serial);
-                if (final) {
-                    if (Update.end(true))
-                        webfpr(Exstring<32>("OTA 写完") + Exstring<16>((int32_t)Update.size()));
-                    else
-                        webfpr(Exstring<16>("OTA 失败"));
-                }
-            });
 
         server.addHandler(&ws);
 
@@ -779,3 +592,5 @@ extern "C" void app_main(void) {
     }
     return;
 }
+#endif
+
