@@ -644,22 +644,31 @@ namespace topams {
 
 
 
+//诊断用:printf 比 std::cout 可靠,C++ 流初始化前也能出
+#define BOOTMARK(x)               \
+    do {                          \
+        printf("[BOOT] " x "\n"); \
+        fflush(stdout);           \
+    } while (0)
+
 extern "C" void app_main(void) {
     using namespace mesp;
 
+    BOOTMARK("app_main enter");
+
     ws_command_init();
+    BOOTMARK("ws_command_init done");
 
     fpr("main函数开始");
     fpr("wsValue数量:", wsValue_state.map.size());
-
+    BOOTMARK("fpr done");
 
     for (size_t i = 0; i < 8; i++) {
         auto& x = topams::motors[i];
         mesp::gpio_out(x.forward, false);
         mesp::gpio_out(x.backward, false);
     }//初始化电机GPIO
-
-
+    BOOTMARK("motor gpio init done");
 
     //异步任务处理,mini线程池
     std::thread async_thread([]() {
@@ -668,12 +677,15 @@ extern "C" void app_main(void) {
             task();
         }
     });
+    BOOTMARK("async_thread created");
+
     xTaskCreate(topams::Task1, "Task1", 3072, NULL, 1, &topams::Task1_handle);//辅助进料任务
+    BOOTMARK("Task1 created");
 
-
-    smartWIFI wifi;
-    // smartWIFI wifi("SSID", "PASS");//也可以先写死
+    smartWIFI wifi("Redmi_F1F8-3", "15823343626");//写死,跳过配网
+    BOOTMARK("wifi ctor done");
     wifi.connected();
+    BOOTMARK("wifi connected");
 
     AsyncWebServer server(80);
     AsyncWebSocket& ws = mesp::ws_server;
