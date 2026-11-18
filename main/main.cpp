@@ -682,7 +682,6 @@ extern "C" void app_main(void) {
 
     smartWIFI wifi("Redmi_F1F8-3", "15823343626");//写死,跳过配网
     BOOTMARK("wifi ctor done");
-    webfpr("BOOT wifi ssid=" + Exstring(mesp::smartWIFI::Wifi_ssid.get().c_str()));
     wifi.connected();
     BOOTMARK("wifi connected");
 
