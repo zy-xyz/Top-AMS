@@ -653,10 +653,11 @@ namespace topams {
 #define UART0_STATUS_REG (*(volatile uint32_t*)(0x60000000UL + 0x1C))
 
 static inline void bootlog(const char* s) {
-    for (; *s; ++s) {
-        while (((UART0_STATUS_REG >> 16) & 0xFF) >= 100) {}
+    //不查 FIFO 状态:ESP32-C3 的 UART_STATUS 位定义和 ESP32 不同,
+    //按 ESP32 的 TXFIFO_CNT(bit16-23) 判空会永远成立 -> 死循环。
+    //几十个字符远小于 FIFO 深度,直接灌就行。
+    for (; *s; ++s)
         UART0_FIFO_REG = (uint32_t)(uint8_t)*s;
-    }
 }
 #define BOOTMARK(x)      \
     do {                 \
