@@ -51,6 +51,13 @@ namespace topams {
 
     inline mesp::Mqttclient mqttclient;
 
+    //每通道一把电机锁:换料流程与辅助进料共用,避免两边同时驱动同一路H桥
+    inline std::array<mstd::lock_key, 16> motor_lock{};
+
+    //打印状态:0=空闲/结束 1=暂停 2=打印中
+    inline std::atomic<int32_t> print_state{0};
+    inline std::atomic<int64_t> print_state_ms{0};//最后一次状态更新的时间戳(steady_clock ms),MQTT 掉线时用于失效
+
 
 #ifdef MOTOR_16
 
@@ -64,6 +71,7 @@ namespace topams {
         }
         motor_id--;
 
+        mstd::RAII_lock motor_guard(motor_lock[motor_id]);//同一通道串行,辅助进料抢不到锁就让路
 
         const auto& motor_forward = topams::motors[motor_id].forward;
         const auto& motor_backward = topams::motors[motor_id].backward;
@@ -95,6 +103,36 @@ namespace topams {
     }//motor_run
 
 #endif
+
+
+    //可中断点动:每 step_ms 查一次 cond,返回 false 立即断电
+    //返回实际通电时长(ms),0 表示没通电
+    template <typename Cond>
+    inline int32_t motor_jog(int32_t motor_id, bool fwd, int32_t max_ms, int32_t step_ms, Cond&& cond) {
+        if (motor_id < 1 || motor_id > (int32_t)topams::motors.size())
+            return 0;
+
+        const auto& m = topams::motors[motor_id - 1];
+        const gpio_num_t pin = fwd ? m.forward : m.backward;
+        if (pin == GPIO_NUM_NC)
+            return 0;
+
+        if (pin == mesp::config::LED_R) [[unlikely]] {//用到通道7就关掉代码里的灯语
+            mesp::config::LED_R = GPIO_NUM_NC;
+            mesp::config::LED_L = GPIO_NUM_NC;
+        }
+
+        int32_t elapsed = 0;
+        mesp::gpio_out(pin, true);
+        while (elapsed < max_ms) {
+            mstd::delay_ms(step_ms);
+            elapsed += step_ms;
+            if (!cond())
+                break;
+        }
+        mesp::gpio_out(pin, false);
+        return elapsed;
+    }//motor_jog
 
 
     inline volatile int32_t hw_switch = 0;//@_@应该是atomic
@@ -273,6 +311,18 @@ namespace topams {
         mstd::Exstring<32> gcode_state = doc["print"]["gcode_state"] | "unkonw";
         hw_switch = doc["print"]["hw_switch_state"] | hw_switch;
 
+        {//打印状态,辅助进料只在挤出机确实在动的时候才动作
+            if (gcode_state == "RUNNING" || gcode_state == "PREPARE")
+                print_state.store(2);
+            else if (gcode_state == "PAUSE")
+                print_state.store(1);
+            else if (gcode_state == "IDLE" || gcode_state == "FINISH" || gcode_state == "FAILED")
+                print_state.store(0);
+            print_state_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+        }
+
         {
 
             if (bed_target_temper > 0 && bed_target_temper < 17) {// 读到的温度是通道
@@ -341,6 +391,22 @@ namespace topams {
                 load_filament(extruder_id);
             }>("load_filament");
 
+            //手动辅助送料:不管微动和打印状态,按当前脉冲时长推一次,用于穿线/补料
+            mesp::command_emplace<+[](int32_t channel_id) {
+                if (channel_id < 1 || channel_id > (int32_t)topams::motors.size()) {
+                    webfpr("辅助送料通道错误");
+                    return;
+                }
+                if (!topams::motor_lock[channel_id - 1].try_lock()) {
+                    webfpr("该通道正忙,稍后再试");
+                    return;
+                }
+                const int32_t ms = topams::assist_config::pulse.get_value();
+                webfpr("辅助送料 " + Exstring(ms) + "ms");
+                motor_jog(channel_id, true, ms, 10, [] { return true; });
+                topams::motor_lock[channel_id - 1].unlock();
+            }>("assist_feed");
+
             mesp::command_emplace<+[]() {
                 mqttclient.topic_publish = mqtt_config::topic_publish();
                 mqttclient.topic_subscribe = mqtt_config::topic_subscribe();
@@ -355,22 +421,72 @@ namespace topams {
 
 
 
-    //微动缓冲程序,要优化
+    //辅助进料任务:微动被压住说明料被挤出机拉紧,推一小段料;微动弹开立刻停
     void Task1(void* param) {
         mesp::gpio_set_in(topams::forward_click);
+        using clk = std::chrono::steady_clock;
 
-        while (true) {
-            int32_t level = gpio_get_level(topams::forward_click);
+        int32_t pressed_cnt = 0;
+        int32_t burst_ms = 0;//本轮连续补料累计
+        auto burst_begin = clk::now();
+        auto last_feed = clk::now();
 
-            if (level == 0) {
-                int32_t now_extruder = extruder.get_value();
-                webfpr("微动触发");
-                motor_run(now_extruder, true, 1s);// 进线
+        for (;;) {
+            mstd::delay_ms(10);
+
+            const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       clk::now().time_since_epoch())
+                                       .count();
+            //只有挤出机在动、且状态不超过 60s 才补料;MQTT 掉线时状态不可信,一律停手
+            if (!topams::assist_config::enable.get_value()
+                || topams::print_state.load() != 2
+                || now_ms - topams::print_state_ms.load() > 60000) {
+                pressed_cnt = 0;
+                burst_ms = 0;
+                continue;
             }
 
-            mstd::delay(50ms);
+            const int32_t ch = topams::extruder.get_value();
+            if (ch < 1 || ch > (int32_t)topams::motors.size()) {
+                pressed_cnt = 0;
+                continue;
+            }
+
+            if (gpio_get_level(topams::forward_click) != 0) {//微动弹开,料不紧
+                pressed_cnt = 0;
+                burst_ms = 0;
+                continue;
+            }
+
+            if (++pressed_cnt < topams::assist_config::dbnc.get_value())
+                continue;
+
+            const auto now = clk::now();
+            if (now - last_feed < std::chrono::milliseconds(topams::assist_config::gap.get_value()))
+                continue;
+
+            if (!topams::motor_lock[ch - 1].try_lock())//换料正在用这个通道,让路
+                continue;
+
+            const int32_t fed = motor_jog(ch, true, topams::assist_config::pulse.get_value(), 10,
+                                          [] { return gpio_get_level(topams::forward_click) == 0; });
+            topams::motor_lock[ch - 1].unlock();
+
+            last_feed = clk::now();
+            pressed_cnt = 0;
+
+            if (clk::now() - burst_begin > std::chrono::seconds(5)) {//统计窗口重置
+                burst_begin = clk::now();
+                burst_ms = 0;
+            }
+            burst_ms += fed;
+            if (burst_ms > topams::assist_config::limit.get_value()) {
+                topams::assist_config::enable.set_value(false);
+                webfpr("辅助进料连续超限,已自动关闭,请检查微动与料路");
+                burst_ms = 0;
+            }
         }
-    }//微动缓冲程序
+    }//辅助进料
 
     TaskHandle_t Task1_handle;//微动任务
 
@@ -404,7 +520,7 @@ extern "C" void app_main(void) {
             task();
         }
     });
-    xTaskCreate(topams::Task1, "Task1", 2048, NULL, 1, &topams::Task1_handle);//微动任务
+    xTaskCreate(topams::Task1, "Task1", 3072, NULL, 1, &topams::Task1_handle);//辅助进料任务
 
 
     smartWIFI wifi;

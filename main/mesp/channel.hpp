@@ -28,6 +28,7 @@ namespace mstd {
       public:
         void lock() noexcept { sp.acquire(); }
         void unlock() noexcept { sp.release(); }
+        bool try_lock() noexcept { return sp.try_acquire(); }//抢不到直接返回,用于低优先级任务让路
     };// lock_key
 
     // 类似unique_lock的基础RAII锁

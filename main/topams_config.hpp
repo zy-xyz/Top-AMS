@@ -82,4 +82,14 @@ namespace topams {
             return "device/" + device_serial.get_value() + "/request";
         }
     };//mqtt_config
+
+
+    //辅助进料参数:打印过程中微动压住时由AMS电机帮挤出机推料
+    struct assist_config {
+        inline static ws_nvs_value<bool> enable{"assist_enable", false};//总开关,默认关
+        inline static ws_nvs_value<int32_t> pulse{"assist_pulse", 400};//单次推送上限(ms)
+        inline static ws_nvs_value<int32_t> gap{"assist_gap", 150};//两次推送最小间隔(ms)
+        inline static ws_nvs_value<int32_t> dbnc{"assist_dbnc", 3};//去抖采样次数(10ms一次)
+        inline static ws_nvs_value<int32_t> limit{"assist_limit", 15000};//连续补料累计上限(ms),超了自动关
+    };//assist_config
 }

@@ -594,6 +594,41 @@
 
         <!-- 主控制面板 -->
         <div id="main-panel" class="panel-content hidden">
+            <div class="section-title"><i class="fas fa-arrow-right"></i> 辅助进料</div>
+
+            <div class="input-grid">
+                <div class="input-group">
+                    <label class="switch" title="辅助进料">
+                        <input type="checkbox" id="assist_enable"
+                            onchange="sendKeyValue('assist_enable', this.checked)">
+                        <span class="slider"></span>
+                        <span style="margin-left:8px;font-weight:500;">启用辅助进料</span>
+                    </label>
+                    <div class="help-text">打印中微动被压住时,由当前通道电机帮挤出机推料,弹开即停</div>
+                </div>
+
+                <div class="input-group">
+                    <label for="assist_pulse">单次推送 (ms)</label>
+                    <input type="number" id="assist_pulse" value="400" min="50" max="3000"
+                        onchange="sendKeyValue('assist_pulse', this.value)">
+                    <div class="help-text">微动弹开会更早停止,这是上限</div>
+                </div>
+
+                <div class="input-group">
+                    <label for="assist_gap">最小间隔 (ms)</label>
+                    <input type="number" id="assist_gap" value="150" min="0" max="5000"
+                        onchange="sendKeyValue('assist_gap', this.value)">
+                    <div class="help-text">两次推送之间的等待,防止电机连续堵转过热</div>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="action-btn success"
+                    onclick="sendCommand('assist_feed', parseInt(document.getElementById('extruder').value))">
+                    <i class="fas fa-arrow-down"></i> 手动送料
+                </button>
+            </div>
+
             <div class="log-panel">
                 <div class="log-header">
                     <h4><i class="fas fa-terminal"></i> 系统运行日志</h4>
