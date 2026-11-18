@@ -10,6 +10,7 @@
 
 #include "../mstd/other.hpp"
 #include "config.hpp"
+#include <esp_timer.h>
 
 
 namespace mesp {
@@ -66,15 +67,22 @@ namespace mesp {
 
 
 
-    using gpin_t = std::tuple<gpio_num_t, std::chrono::steady_clock::time_point>;//可能叫button更好
+    //中断事件:只带 pin 和微秒时间戳,全部是 POD,可在 ISR 里安全构造
+    //不能用 std::chrono:steady_clock::now() 不在 IRAM,ISR 里调用有踩 flash cache 的风险
+    struct gpio_event {
+        gpio_num_t pin;
+        int64_t us;//esp_timer_get_time()
+    };
 
-    inline QueueHandle_t gpio_channle = xQueueCreate(1, sizeof(gpin_t));//中断队列
+    inline QueueHandle_t gpio_channle = xQueueCreate(8, sizeof(gpio_event));//深度 8,边沿密集时不丢
 
     //统一将IO脚编号加入队列
     inline void IRAM_ATTR __gpio_isr_handler(void* arg) {
-        gpio_num_t gpio_num = (gpio_num_t)(uintptr_t)(arg);
-        gpin_t in{gpio_num, std::chrono::steady_clock::now()};//@_@可能不需要
-        xQueueSendFromISR(gpio_channle, &in, NULL);
+        BaseType_t woken = pdFALSE;
+        gpio_event in{(gpio_num_t)(uintptr_t)(arg), esp_timer_get_time()};
+        xQueueSendFromISR(gpio_channle, &in, &woken);
+        if (woken == pdTRUE)
+            portYIELD_FROM_ISR();//有更高优先级任务被唤醒时立刻切,别等 ISR 返回
     }
 
     inline void gpio_set_in(gpio_num_t IO) {//未来如果有别的需求可以抽象一下,只改中断触发方式
