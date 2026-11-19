@@ -422,12 +422,10 @@ namespace topams {
 
 
 
-    //辅助进料任务:微动被压住说明料被挤出机拉紧,推一小段料;微动弹开立刻停
+    //辅助进料任务:没有微动,按固定节奏定时推料;安全性靠超限自动关
     void Task1(void* param) {
-        mesp::gpio_set_in(topams::forward_click);
         using clk = std::chrono::steady_clock;
 
-        int32_t pressed_cnt = 0;
         int32_t burst_ms = 0;//本轮连续补料累计
         auto burst_begin = clk::now();
         auto last_feed = clk::now();
@@ -435,33 +433,15 @@ namespace topams {
         for (;;) {
             mstd::delay_ms(10);
 
-            const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                       clk::now().time_since_epoch())
-                                       .count();
-            //只有挤出机在动、且状态不超过 60s 才补料;MQTT 掉线时状态不可信,一律停手
-            //拓竹增量推送可能整场不带 gcode_state,不能拿它当门控,
-            //否则辅助进料永远不触发。只认开关,安全性靠微动弹开即停+超限自动关。
-            (void)now_ms;
             if (!topams::assist_config::enable.get_value()) {
-                pressed_cnt = 0;
                 burst_ms = 0;
                 continue;
             }
 
             const int32_t ch = topams::extruder.get_value();
             if (ch < 1 || ch > (int32_t)topams::motors.size()) {
-                pressed_cnt = 0;
                 continue;
             }
-
-            if (gpio_get_level(topams::forward_click) != 0) {//微动弹开,料不紧
-                pressed_cnt = 0;
-                burst_ms = 0;
-                continue;
-            }
-
-            if (++pressed_cnt < topams::assist_config::dbnc.get_value())
-                continue;
 
             const auto now = clk::now();
             if (now - last_feed < std::chrono::milliseconds(topams::assist_config::gap.get_value()))
@@ -471,11 +451,10 @@ namespace topams {
                 continue;
 
             const int32_t fed = motor_jog(ch, true, topams::assist_config::pulse.get_value(), 10,
-                                          [] { return gpio_get_level(topams::forward_click) == 0; });
+                                          [] { return false; });
             topams::motor_lock[ch - 1].unlock();
 
             last_feed = clk::now();
-            pressed_cnt = 0;
 
             if (clk::now() - burst_begin > std::chrono::seconds(5)) {//统计窗口重置
                 burst_begin = clk::now();
@@ -484,13 +463,13 @@ namespace topams {
             burst_ms += fed;
             if (burst_ms > topams::assist_config::limit.get_value()) {
                 topams::assist_config::enable.set_value(false);
-                webfpr("辅助进料连续超限,已自动关闭,请检查微动与料路");
+                webfpr("辅助进料连续超限,已自动关闭,请检查料路");
                 burst_ms = 0;
             }
         }
     }//辅助进料
 
-    TaskHandle_t Task1_handle;//微动任务
+    TaskHandle_t Task1_handle;//辅助进料任务
 
 
 }//topams
