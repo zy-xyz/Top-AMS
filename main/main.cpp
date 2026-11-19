@@ -462,7 +462,7 @@ namespace topams {
                 continue;
 
             const int32_t fed = motor_jog(ch, true, topams::assist_config::pulse.get_value(), 10,
-                                          [] { return false; });
+                                          [] { return true; });
             topams::motor_lock[ch - 1].unlock();
 
             last_feed = clk::now();
