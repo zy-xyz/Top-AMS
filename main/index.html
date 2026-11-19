@@ -590,6 +590,14 @@
                 </button>
 
             </div>
+
+            <div class="section-title"><i class="fas fa-upload"></i> 固件升级</div>
+            <div class="action-buttons">
+                <input type="file" id="ota_file" accept=".bin">
+                <button class="action-btn" onclick="uploadOTA()">
+                    <i class="fas fa-upload"></i> 上传并重启
+                </button>
+            </div>
         </div>
 
         <!-- 主控制面板 -->
@@ -934,6 +942,21 @@
         }
 
         // 发送MQTT参数
+        async function uploadOTA() {
+            const f = document.getElementById('ota_file').files[0];
+            if (!f) { log('未选择固件文件', 'warning'); return; }
+            log('开始上传 ' + f.name + ' (' + f.size + ' 字节)', 'info');
+            const fd = new FormData();
+            fd.append('firmware', f, f.name);
+            try {
+                const r = await fetch('/update', { method: 'POST', body: fd });
+                const t = await r.text();
+                log('升级结果: ' + t, r.ok ? 'success' : 'error');
+            } catch (e) {
+                log('上传失败: ' + e.message, 'error');
+            }
+        }
+
         function sendMQTT() {
             // 触发设备侧统一的启动命令；输入框变更已由 onchange 自动上报
             sendCommand('MQTT_connect', 0);

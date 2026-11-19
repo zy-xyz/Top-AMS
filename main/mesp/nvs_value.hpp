@@ -26,32 +26,44 @@ namespace mesp {
 
     namespace details {
 
-        inline mstd::call_once __init_nvs(
-            []() {
+        //NVS 必须在首次使用时才初始化。放在全局构造里做有两处会死锁:
+        //nvs_flash_init 早于 SPI flash 驱动就绪,以及 nvs_open 早于 nvs_flash_init
+        //(两个全局对象的构造顺序由链接器决定,加几个全局对象就会翻车)。
+        inline void ensure_nvs_ready() {
+            static const bool inited = []() {
                 auto err = nvs_flash_init();
-                // 如果NVS分区损坏或首次使用，需要擦除并重新初始化
                 if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-                    ESP_ERROR_CHECK(nvs_flash_erase());// 擦除NVS分区
-                    err = nvs_flash_init();// 重新初始化NVS
+                    ESP_ERROR_CHECK(nvs_flash_erase());
+                    err = nvs_flash_init();
                 }
                 ESP_ERROR_CHECK(err);
-            });
+                return true;
+            }();
+            (void)inited;
+        }
 
     }//details
 
     struct nvs_space {
-        nvs_handle_t handle;
-        nvs_space(const char* namespace_name, nvs_open_mode_t open_mode = NVS_READWRITE) {
-            esp_err_t err = nvs_open(namespace_name, open_mode, &handle);
-            if (err != ESP_OK) {
-                mstd::log_error("打开NVS命名空间失败");
-            }
-        }
+        nvs_handle_t handle = 0;
+        const char* ns_name;
+        nvs_open_mode_t ns_mode;
+
+        nvs_space(const char* namespace_name, nvs_open_mode_t open_mode = NVS_READWRITE)
+            : ns_name(namespace_name), ns_mode(open_mode) {}
+
         ~nvs_space() {
-            nvs_close(handle);
+            if (handle) nvs_close(handle);
         }
 
-        operator nvs_handle_t&() noexcept {
+        operator nvs_handle_t&() {
+            if (!handle) {
+                details::ensure_nvs_ready();
+                esp_err_t err = nvs_open(ns_name, ns_mode, &handle);
+                if (err != ESP_OK) {
+                    mstd::log_error("打开NVS命名空间失败");
+                }
+            }
             return handle;
         }
     };
@@ -71,15 +83,22 @@ namespace mesp {
         using const_value_type = const value_type;
 
         key_type key;
-        value_type value;
+        mutable value_type value;
+
+        mutable bool loaded = false;
 
         nvs_value(const key_type& k, const_value_type& def)
-            : key(k), value(def) {
+            : key(k), value(def) {}
+
+        //全局构造阶段不能碰NVS(nvs_flash_init 与 nvs_open 都会死锁),推迟到首次访问
+        void load() const {
+            if (loaded) return;
+            loaded = true;
             size_t value_size = sizeof(value_type);
             auto err = nvs_get_blob(store_space, key.c_str(), &value, &value_size);
 
-            if (err == ESP_ERR_NVS_NOT_FOUND) {//找不到键,需要初始化
-                this->operator=(def);
+            if (err == ESP_ERR_NVS_NOT_FOUND) {
+                //读取路径不写盘。默认值构造函数已设好,写回会在NVS满时卡死。
             } else if (err != ESP_OK) {
                 mstd::log_error("读取NVS失败");
                 fpr("错误码:", esp_err_to_name(err));
@@ -113,7 +132,8 @@ namespace mesp {
         }
 
 
-        const_value_type& get() const noexcept {
+        const_value_type& get() const {
+            load();
             return value;
         }
         const_value_type& set(const value_type& v) {
@@ -121,17 +141,19 @@ namespace mesp {
             return value;
         }
 
-        operator value_type&() noexcept {
+        operator value_type&() {
+            load();
             return value;
         }
-        operator const_value_type&() const noexcept {
+        operator const_value_type&() const {
+            load();
             return value;
         }
 
 
         template <typename Y>
-        bool operator==(const Y& r) const noexcept {
-            return value == r;
+        bool operator==(const Y& r) const {
+            return get() == r;
         }
 
     };//NVSvalue

@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
+#include <Update.h>
 
 // #undef F
 
@@ -393,7 +394,7 @@ namespace topams {
 
             //手动辅助送料:不管微动和打印状态,按当前脉冲时长推一次,用于穿线/补料
             mesp::command_emplace<+[](int32_t channel_id) {
-                if (channel_id < 1 || channel_id > (int32_t)topams::motors.size()) {
+                if ((channel_id < 1) || (channel_id > (int32_t)topams::motors.size())) {
                     webfpr("辅助送料通道错误");
                     return;
                 }
@@ -497,21 +498,8 @@ namespace topams {
 
 
 
-//==== 二分诊断:最小 app_main,只裸写 UART0 + 延时 ====
-#define UART0_FIFO_REG   (*(volatile uint32_t*)(0x60000000UL + 0x00))
-static inline void bootlog(const char* s) {
-    for (; *s; ++s) UART0_FIFO_REG = (uint32_t)(uint8_t)*s;
-}
-
 extern "C" void app_main(void) {
-    for (uint32_t n = 0;; ++n) {
-        bootlog("ALIVE\r\n");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-
-#if 0
-extern "C" void app_main(void) {
+    initArduino();//覆盖了Arduino的app_main,必须自己初始化运行时
     using namespace mesp;
 
     ws_command_init();
@@ -522,6 +510,8 @@ extern "C" void app_main(void) {
 
     for (size_t i = 0; i < 8; i++) {
         auto& x = topams::motors[i];
+        if (x.forward == GPIO_NUM_20 || x.forward == GPIO_NUM_21) continue;//UART控制台脚,启动时不碰
+        if (x.backward == GPIO_NUM_20 || x.backward == GPIO_NUM_21) continue;
         mesp::gpio_out(x.forward, false);
         mesp::gpio_out(x.backward, false);
     }//初始化电机GPIO
@@ -568,6 +558,24 @@ extern "C" void app_main(void) {
 
         server.addHandler(&ws);
 
+        //在线升级:POST /update 上传完整固件镜像,写入另一个OTA槽后重启
+        server.on("/update", HTTP_POST, [](AsyncWebServerRequest* request) {
+            bool ok = !Update.hasError();
+            request->send(200, "text/plain", ok ? "OK, rebooting" : "FAIL");
+            if (ok) {
+                mstd::delay(500ms);
+                ESP.restart();
+            }
+        },
+                  [](AsyncWebServerRequest* request, String filename, size_t index, uint8_t* data, size_t len, bool final) {
+                      if (!index)
+                          Update.begin(UPDATE_SIZE_UNKNOWN);
+                      if (Update.write(data, len) != len)
+                          Update.printError(Serial);
+                      if (final)
+                          Update.end(true);
+                  });
+
         // 设置未找到路径的处理
         server.onNotFound([](AsyncWebServerRequest* request) {
             request->send(404, "text/plain", "404: Not found");
@@ -592,5 +600,3 @@ extern "C" void app_main(void) {
     }
     return;
 }
-#endif
-

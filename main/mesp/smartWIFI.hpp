@@ -15,6 +15,7 @@
 #include "nvs_value.hpp"
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 
 #include "espIO.hpp"
 
@@ -53,6 +54,12 @@ namespace mesp {
 
             } else {
                 WiFi.begin(Wifi_ssid.get().c_str(), Wifi_pass.get().c_str());
+                wifi_config_t cfg = {};
+                strncpy((char*)cfg.sta.ssid, Wifi_ssid.get().c_str(), sizeof(cfg.sta.ssid) - 1);
+                strncpy((char*)cfg.sta.password, Wifi_pass.get().c_str(), sizeof(cfg.sta.password) - 1);
+                esp_wifi_set_storage(WIFI_STORAGE_RAM);//NVS满时写flash会失败,配置进不了驱动
+                esp_wifi_set_config(WIFI_IF_STA, &cfg);
+                esp_wifi_connect();
             }
 
             // 等待WiFi连接到路由器
