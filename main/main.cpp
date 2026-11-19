@@ -59,6 +59,7 @@ namespace topams {
     inline std::atomic<int32_t> print_state{0};
     inline std::atomic<int64_t> print_state_ms{0};//最后一次状态更新的时间戳(steady_clock ms),MQTT 掉线时用于失效
     inline std::atomic<int32_t> mc_remaining{0};//剩余打印分钟数,0=不在打印。gcode_state 常缺,用它当门控
+    inline std::atomic<int32_t> nozzle_temper{0};//喷头当前温度。真机增量推送只稳定带这个,打印中 >200
 
 
 #ifdef MOTOR_16
@@ -313,6 +314,7 @@ namespace topams {
         mstd::Exstring<32> gcode_state = doc["print"]["gcode_state"] | "unkonw";
         hw_switch = doc["print"]["hw_switch_state"] | hw_switch;
         mc_remaining.store(doc["print"]["mc_remaining_time"] | mc_remaining.load());
+        nozzle_temper.store(doc["print"]["nozzle_temper"] | nozzle_temper.load());
 
         {//打印状态,辅助进料只在挤出机确实在动的时候才动作
             if (gcode_state == "RUNNING" || gcode_state == "PREPARE")
@@ -440,7 +442,9 @@ namespace topams {
                 continue;
             }
 
-            if (topams::mc_remaining.load() <= 0) {//没在打印,不推
+            //真机增量推送里 gcode_state/mc_remaining_time 常整场缺失,
+            //只有 nozzle_temper 稳定出现:打印中 >200,空闲 <50
+            if (topams::mc_remaining.load() <= 0 && topams::nozzle_temper.load() < 150) {
                 burst_ms = 0;
                 continue;
             }
