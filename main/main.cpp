@@ -58,6 +58,7 @@ namespace topams {
     //打印状态:0=空闲/结束 1=暂停 2=打印中
     inline std::atomic<int32_t> print_state{0};
     inline std::atomic<int64_t> print_state_ms{0};//最后一次状态更新的时间戳(steady_clock ms),MQTT 掉线时用于失效
+    inline std::atomic<int32_t> mc_remaining{0};//剩余打印分钟数,0=不在打印。gcode_state 常缺,用它当门控
 
 
 #ifdef MOTOR_16
@@ -311,6 +312,7 @@ namespace topams {
         nozzle_target_temper.store(doc["print"]["nozzle_target_temper"] | nozzle_target_temper.load());
         mstd::Exstring<32> gcode_state = doc["print"]["gcode_state"] | "unkonw";
         hw_switch = doc["print"]["hw_switch_state"] | hw_switch;
+        mc_remaining.store(doc["print"]["mc_remaining_time"] | mc_remaining.load());
 
         {//打印状态,辅助进料只在挤出机确实在动的时候才动作
             if (gcode_state == "RUNNING" || gcode_state == "PREPARE")
@@ -434,6 +436,11 @@ namespace topams {
             mstd::delay_ms(10);
 
             if (!topams::assist_config::enable.get_value()) {
+                burst_ms = 0;
+                continue;
+            }
+
+            if (topams::mc_remaining.load() <= 0) {//没在打印,不推
                 burst_ms = 0;
                 continue;
             }
